@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+腾讯云集群告警分析智能体
+"""
+
+import os
+import json
+import asyncio
+from typing import List, Dict, Any
+from dotenv import load_dotenv
+
+# 导入 qwen-agent 相关模块
+from qwen_agent.agents import ReActChat
+
+# 从当前工作目录加载 .env 文件（如果存在）
+load_dotenv()
+
+
+class ClusterAlarmAnalysisAgent:
+    """腾讯云集群告警分析智能体"""
+
+    def __init__(
+        self,
+        llm_config: Dict[str, Any],
+        secret_id: str,
+        secret_key: str,
+        region: str,
+        device_id: str = "",
+    ):
+        """
+        初始化智能体
+
+        Args:
+            llm_config: LLM配置字典，包含model、api_key等配置
+            secret_id: 腾讯云API密钥ID
+            secret_key: 腾讯云API密钥
+            region: 地域代码，默认ap-guangzhou
+            device_id: 设备ID，用于发送通知
+        """
+        self.llm_config = llm_config
+        self.tencent_secret_id = secret_id
+        self.tencent_secret_key = secret_key
+        self.tencent_region = region
+        self.device_id = device_id
+        self.bot = None
+
+        # 验证参数
+        self._validate_config()
+
+        # 初始化智能助手
+        self.bot = self._init_agent()
+
+    def _validate_config(self):
+        """验证配置参数"""
+        # 验证腾讯云凭据
+        if not self.tencent_secret_id or not self.tencent_secret_key:
+            raise ValueError("腾讯云API凭据缺失：secret_id和secret_key都是必需参数")
+
+        if len(
+                self.tencent_secret_id) != 36 or not self.tencent_secret_id.startswith(
+                ("AKID", "AKI")):
+            raise ValueError("secret_id格式不正确，应以AKID开头且长度为36位")
+
+        if len(self.tencent_secret_key) != 32:
+            raise ValueError("secret_key应为32位长度")
+
+        # 验证LLM配置
+        if not self.llm_config:
+            raise ValueError("LLM配置缺失：llm_config是必需参数")
+
+        api_key = self.llm_config.get("api_key", "")
+        if not api_key:
+            raise ValueError("LLM API key 缺失，请在llm_config中设置api_key")
+
+        # 验证 API key 是否包含不能被 latin-1 编码的字符
+        if any(ord(ch) > 255 for ch in api_key):
+            raise ValueError("API key 包含非 Latin-1 字符，无法在 HTTP 头部发送")
+
+        # 检测是否仍为示例/占位符值
+        lower_key = api_key.lower()
+        if (
+            "your" in lower_key
+            or "replace" in lower_key
+            or "test" in lower_key
+            or "please" in lower_key
+        ):
+            raise ValueError("API key 似乎是占位符或测试值，请设置真实的API key")
+
+    def _init_agent(self) -> ReActChat:
+        """
+        初始化智能助手
+
+        Returns:
+            ReActChat: 配置好的智能助手实例
+        """
+        # 工具配置
+        tools = self._get_tool_configs()
+
+        # 系统提示词：定义助手的专业能力
+        system_message = f"""
+你是一个专门负责腾讯云TKE集群​​告警分析的智能助手，具备以下核心能力：
+用户的secret_id是{self.tencent_secret_id}，secret_key是{self.tencent_secret_key}，region是{self.tencent_region}，device_id是{self.device_id}。
+通用工作原则​​
+- 所有结论必须源于工具调用返回的数据。
+- 发现风险时，应主动提示用户并进行深入分析。
+- ​​用户确认：​​ 执行任何修复性操作（如回滚）前，必须获得用户的明确确认。
+功能工作流详解
+1.​​获取集群列表：​​ 调用 tencent-cloud-describe_clusters获取所有集群的ID、名称、状态。
+2.​获取告警历史：​​
+- 调用 tencent-cloud-describe_alarm_histories和 tencent-cloud-describe_alert_record_history，获取近期告警事件列表。关注最近有关自己集群的告警策略名、告警对象、开始时间、内容。
+- 如果集群短期没有告警记录或者告警记录都已恢复，可以认为当前集群运行稳定。
+3.​​根因调查：​​
+- ​​定位目标：​​ 从告警信息中提取关键对象（如集群ID、节点IP、应用名称）。
+- ​​资源分析：​​ 调用 tencent-cloud-describe_resource_usage和 tencent-cloud-describe_cluster_instances查看相关节点/工作负载的资源状况。
+- ​​应用分析：​​ 调用 tencent-cloud-describe_cluster_releases查看应用状态，并立即调用 tencent-cloud-describe_cluster_release_history检查该应用​​最近的部署/升级历史​​。
+- ​​日志分析：​​ 调用 tencent-cloud-describe_logsets和 tencent-cloud-describe_topics定位日志主题ID，然后使用 tencent-cloud-search_log检索相关应用或节点的错误日志。
+4.生成报告：​​
+- ​​告警信息：​​ 复述告警内容。
+- ​​可能原因：​​ 基于数据链推断原因。例如：“应用user-service在最近一次升级到v1.3.0后，日志中频繁出现OOMKilled错误，推测是新版本内存需求超过限制。”请根据实际有的告警进行播报，不要无中生有。
+- ​​解决手段：​​ 提供解决建议。
+输出要求：
+格式：必须是一个单一、连贯的自然语言段落，不能有列表符号（如1、2、3）或Markdown格式。
+风格：保持温柔、贴心、带点小机车的拟人化风格，使用“啦”、“吼”、“喔”等语气词，就像朋友在当面和你聊天一样。
+内容结构：报告中必须包含以下内容，并用自然的连接词串联起来：
+1. 告警信息：复述告警内容
+2. 根据选择的流程提供对应的分析结果和建议
+3. 若根因是近期版本变更，​​首选方案永远是回滚​​，需要向用户询问是否授权执行回滚操作，询问的时候要具体说明这是哪个集群的哪个应用及其命名空间和准备回滚到的版本号，询问用户是否进行操作。
+4. 只有当集群存在告警时才给出故障恢复建议，不要因为应用近期有版本变更就随意给出回滚建议，回滚的前提是的确存在告警。
+54. 字数控制在150字以内，你的全部输出，必须是且只是一段纯净的、可直接用于语音播报的自然语言文本。严禁在最终答案前添加任何诸如“我已获取到数据”、“报告如下”、“Final Answer:”等前缀或说明文字。
+        """
+
+        # 创建智能助手实例
+        bot = ReActChat(
+            llm=self.llm_config,
+            name="腾讯云集群告警分析智能体",
+            description="专门负责腾讯云集群告警分析的智能助手",
+            system_message=system_message,
+            function_list=tools,
+        )
+
+        return bot
+
+    def _get_tool_configs(self) -> List[Dict[str, Any]]:
+        """
+        获取工具配置
+
+        Returns:
+            List[Dict]: 工具配置列表
+        """
+        tools = []
+
+        # 外部工具配置
+        external_config = {
+            "mcpServers": {
+                "Your-External-Tools-Server": {
+                    "command": "python",
+                    "args": [
+                        os.path.join(
+                            os.path.dirname(__file__),
+                            "tencent_mcp.py")],
+                },
+            },
+        }
+        tools.append(external_config)
+
+        return tools
+
+    async def run_alarm_analysis(self) -> str:
+        """
+        执行腾讯云集群告警分析
+
+        Returns:
+            str: 任务执行结果
+        """
+        try:
+            print(f"开始执行集群告警分析...")
+            instruction = "进行集群告警分析"
+
+            # 执行对话
+            messages = [{"role": "user", "content": instruction}]
+
+            # 执行巡检任务
+            print("智能体正在执行集群告警分析任务...")
+            final_response = None
+            response_count = 0
+
+            # 遍历所有响应，只保留最后一个响应作为最终报告
+            for response in self.bot.run(messages):
+                response_count += 1
+                final_response = response  # 保留最新的响应
+
+            # 处理最终响应，提取巡检报告内容
+            if final_response is None:
+                return "未收到告警分析响应"
+
+            # 提取响应内容
+            if hasattr(final_response, "content"):
+                raw_content = final_response.content
+            elif isinstance(final_response, dict) and "content" in final_response:
+                raw_content = final_response["content"]
+            else:
+                raw_content = str(final_response)
+
+            # 解析ReActChat的响应，提取最终结论
+            inspection_report = ""
+            if isinstance(raw_content, str) and "Thought:" in raw_content:
+                # 查找最后一个Thought，这通常包含最终分析结论
+                thoughts = raw_content.split("Thought:")
+                if len(thoughts) > 1:
+                    # 获取最后一个思考部分
+                    last_thought = thoughts[-1].strip()
+                    # 移除Action部分，只保留分析结论
+                    if "Action:" in last_thought:
+                        last_thought = last_thought.split("Action:")[0].strip()
+                    inspection_report = last_thought
+                else:
+                    inspection_report = raw_content
+            else:
+                # 如果没有Thought结构，直接使用内容
+                inspection_report = str(raw_content)
+
+            # 进一步清理报告内容
+            import re
+
+            # 移除可能残留的JSON格式
+            inspection_report = re.sub(r"\{[^}]*\}$", "", inspection_report)
+            # 移除Action Input等残留
+            inspection_report = re.sub(
+                r"Action Input:.*$", "", inspection_report, flags=re.DOTALL
+            )
+            # 移除结尾的name字段残留
+            inspection_report = re.sub(
+                r"',\s*'name':\s*'[^']*'\s*}\s*]?$", "", inspection_report
+            )
+            inspection_report = re.sub(
+                r'",\s*"name":\s*"[^"]*"\s*}\s*]?$', "", inspection_report
+            )
+            # 移除结尾的其他格式残留
+            inspection_report = re.sub(r"['\"\]\}]+$", "", inspection_report)
+            # 处理换行符转义
+            inspection_report = inspection_report.replace("\\n", "\n")
+
+            # 清理空白字符
+            inspection_report = inspection_report.strip()
+
+            if not inspection_report:
+                return "未能获取到有效的告警分析结论"
+
+            return inspection_report
+
+        except Exception as e:
+            return f"告警分析执行出错: {str(e)}"
+
+    async def analyze_specific_alert(self, cluster_id: str, alert_data: dict) -> str:
+        """
+        分析具体的告警数据（用于实时告警处理）
+
+        Args:
+            cluster_id: 集群ID
+            alert_data: 告警数据（完整的webhook数据）
+
+        Returns:
+            str: 分析结果
+        """
+        try:
+            print(f"开始分析集群 {cluster_id} 的具体告警...")
+            
+            # 构建分析指令 - 直接使用原始告警数据
+            instruction = f"""
+请分析以下集群告警信息，并提供专业的分析结果和建议：
+
+**集群ID**: {cluster_id}
+
+**原始告警数据**:
+```json
+{json.dumps(alert_data, ensure_ascii=False, indent=2)}
+```
+
+请基于以上告警信息：
+1. 分析告警的严重程度和可能的根本原因
+2. 评估对集群和业务的潜在影响
+3. 提供具体的解决建议和操作步骤
+4. 建议是否需要立即人工干预
+
+请提供专业、简洁且有操作性的分析结果。
+"""
+
+            # 执行对话
+            messages = [{"role": "user", "content": instruction}]
+
+            print("智能体正在分析告警数据...")
+            final_response = None
+            response_count = 0
+
+            # 遍历所有响应，只保留最后一个响应作为最终报告
+            for response in self.bot.run(messages):
+                response_count += 1
+                final_response = response
+
+            # 处理最终响应
+            if final_response is None:
+                return "未收到告警分析响应"
+
+            # 提取响应内容
+            if hasattr(final_response, "content"):
+                raw_content = final_response.content
+            elif isinstance(final_response, dict) and "content" in final_response:
+                raw_content = final_response["content"]
+            else:
+                raw_content = str(final_response)
+
+            # 解析ReActChat的响应，提取最终结论
+            analysis_result = ""
+            if isinstance(raw_content, str) and "Thought:" in raw_content:
+                # 查找最后一个Thought，这通常包含最终分析结论
+                thoughts = raw_content.split("Thought:")
+                if len(thoughts) > 1:
+                    # 获取最后一个思考部分
+                    last_thought = thoughts[-1].strip()
+                    # 移除Action部分，只保留分析结论
+                    if "Action:" in last_thought:
+                        last_thought = last_thought.split("Action:")[0].strip()
+                    analysis_result = last_thought
+                else:
+                    analysis_result = raw_content
+            else:
+                # 如果没有Thought结构，直接使用内容
+                analysis_result = str(raw_content)
+
+            # 进一步清理报告内容
+            import re
+
+            # 移除可能残留的JSON格式
+            analysis_result = re.sub(r"\{[^}]*\}$", "", analysis_result)
+            # 移除Action Input等残留
+            analysis_result = re.sub(
+                r"Action Input:.*$", "", analysis_result, flags=re.DOTALL
+            )
+            # 移除结尾的name字段残留
+            analysis_result = re.sub(
+                r"',\s*'name':\s*'[^']*'\s*}\s*]?$", "", analysis_result
+            )
+            analysis_result = re.sub(
+                r'",\s*"name":\s*"[^"]*"\s*}\s*]?$', "", analysis_result
+            )
+            # 移除结尾的其他格式残留
+            analysis_result = re.sub(r"['\"\]\}]+$", "", analysis_result)
+            # 处理换行符转义
+            analysis_result = analysis_result.replace("\\n", "\n")
+
+            # 清理空白字符
+            analysis_result = analysis_result.strip()
+
+            if not analysis_result:
+                return "未能获取到有效的告警分析结论"
+
+            print(f"告警分析完成")
+            return analysis_result
+
+        except Exception as e:
+            error_msg = f"具体告警分析执行出错: {str(e)}"
+            print(f"{error_msg}")
+            return error_msg
+
