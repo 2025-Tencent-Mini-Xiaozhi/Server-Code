@@ -503,7 +503,6 @@ class ServerMCPClient:
             data = {
                 "device_id": device_id,
                 "message": message,
-                "auth_key": self.config.get("server", {}).get("auth_key", ""),
                 "bypass_llm": True,  # 强制绕过LLM
                 "notification_type": notification_type,
             }
@@ -555,7 +554,6 @@ class ServerMCPClient:
             data = {
                 "device_id": device_id,
                 "message": request,
-                "auth_key": self.config.get("server", {}).get("auth_key", ""),
                 "bypass_llm": False,  # 强制使用LLM
                 "notification_type": notification_type,
             }

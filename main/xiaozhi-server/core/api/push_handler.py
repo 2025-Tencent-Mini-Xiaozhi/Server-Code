@@ -47,7 +47,6 @@ class PushHandler:
             "device_id": "设备ID", (单个设备推送时必需)
             "message": "要发送的文字消息", (必需)
             "voice": "语音类型(可选)",
-            "auth_key": "认证密钥", (必需)
             "bypass_llm": true/false, (可选，默认false，是否绕过LLM直接TTS)
             "notification_type": "info/warning/error/success/system/urgent", (可选，通知类型)
             "broadcast": true/false, (可选，默认false，是否广播到所有设备)
@@ -85,7 +84,6 @@ class PushHandler:
             # 验证必需参数
             device_id = data.get("device_id")
             message = data.get("message")
-            auth_key = data.get("auth_key")
             bypass_llm = data.get("bypass_llm", False)
             notification_type = data.get("notification_type", "info")
             is_broadcast = data.get("broadcast", False)
@@ -105,16 +103,6 @@ class PushHandler:
                 return web.json_response(
                     {"success": False, "message": "单设备推送模式下缺少必需参数: device_id"},
                     status=400,
-                    headers=headers
-                )
-
-            # 验证认证密钥
-            expected_auth_key = self.config.get("server", {}).get("auth_key")
-            if expected_auth_key and auth_key != expected_auth_key:
-                self.logger.bind(tag=TAG).error(f"认证失败")
-                return web.json_response(
-                    {"success": False, "message": "认证失败"},
-                    status=401,
                     headers=headers
                 )
 
