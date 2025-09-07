@@ -16,6 +16,10 @@ load_dotenv()
 # 初始化 MCP 服务器
 mcp = FastMCP("Agent_MCP_Server")
 
+def get_auth_key() -> str:
+    """从环境变量获取认证密钥"""
+    return os.getenv("AUTH_KEY", "")
+
 def send_device_notification(
     device_id: str, message: str, notification_type: str = "info"
 ) -> str:
@@ -27,7 +31,7 @@ def send_device_notification(
         data = {
             "device_id": device_id,
             "message": message,
-            "auth_key": "3b039beb-90fa-4170-bed2-e0e146126877",
+            "auth_key": get_auth_key(),
             "bypass_llm": True,  # 强制绕过LLM
             "notification_type": notification_type,
         }
@@ -62,7 +66,7 @@ def send_ai_request(
         data = {
             "device_id": device_id,
             "message": request,
-            "auth_key": "3b039beb-90fa-4170-bed2-e0e146126877",
+            "auth_key": get_auth_key(),
             "bypass_llm": False,  # 强制使用LLM
             "notification_type": notification_type,
         }
@@ -233,7 +237,7 @@ def _run_async_inspection_in_thread(
                 data = {
                     "device_id": device_id,
                     "message": f"集群巡检线程执行失败: {str(e)}",
-                    "auth_key": "3b039beb-90fa-4170-bed2-e0e146126877",
+                    "auth_key": get_auth_key(),
                     "bypass_llm": True,
                     "notification_type": "error",
                 }

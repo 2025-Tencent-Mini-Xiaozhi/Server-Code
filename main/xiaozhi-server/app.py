@@ -2,6 +2,7 @@ import sys
 import uuid
 import signal
 import asyncio
+import os
 from aioconsole import ainput
 from config.settings import load_config
 from config.logger import setup_logging
@@ -54,6 +55,22 @@ async def main():
     if not auth_key or len(auth_key) == 0 or "你" in auth_key:
         auth_key = str(uuid.uuid4().hex)
     config["server"]["auth_key"] = auth_key
+    
+    # 将 auth_key 写入到 server_mcp 目录的 .env 文件中
+    server_mcp_env_path = "core/providers/tools/server_mcp/.env"
+    try:
+        # 确保目录存在
+        os.makedirs(os.path.dirname(server_mcp_env_path), exist_ok=True)
+        
+        # 写入 .env 文件
+        with open(server_mcp_env_path, "w", encoding="utf-8") as f:
+            f.write(f"AUTH_KEY={auth_key}\n")
+            f.write(f"AGENT_MODEL={os.getenv('AGENT_MODEL', '')}\n")
+            f.write(f"AGENT_API_KEY={os.getenv('AGENT_API_KEY', '')}\n")
+        
+        logger.bind(tag=TAG).info("已将认证密钥写入到 {}", server_mcp_env_path)
+    except Exception as e:
+        logger.bind(tag=TAG).error("写入 .env 文件失败: {}", e)
     
     # 输出认证密钥用于推送接口测试
     logger.bind(tag=TAG).info("推送接口认证密钥：{}", auth_key)
